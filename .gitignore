@@ -1,5 +1,1 @@
-*.log
-index/
-caddy-search.test
-*.out
 .vscode

@@ -2,7 +2,7 @@
 
 Middleware for [Caddy](https://caddyserver.com).
 
-**search** indexes your static and/or dynamic documents then serves a HTTP search endpoint.
+**search** indexes your static and dynamic documents then serves a HTTP search endpoint.
 Folked from https://github.com/blevesearch . Modified to support Caddy V2, with a lot of new features.
 
 * Support Caddy V2
@@ -70,12 +70,15 @@ localhost:2016 {
 			expire      0		
 			analyzer    "sego"
 			numworker   2
-            +path /static/docs/
-            -path ^/blog/admin/
-            -path robots.txt
+			+path /static/docs/
+			-path ^/blog/admin/
+			-path robots.txt
 		}
 		file_server
 	}
 }
 ```
 
+## How to build
+* Put in under caddy/modules, import `github.com/caddyserver/caddy/v2/modules/caddy-search` in caddy/cmd/caddy/main.go
+* Or use xcaddy
