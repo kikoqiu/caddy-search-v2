@@ -3,7 +3,9 @@
 Middleware for [Caddy](https://caddyserver.com).
 
 **search** indexes your static and dynamic documents then serves a HTTP search endpoint.
-Folked from https://github.com/blevesearch . Modified to support Caddy V2, with a lot of new features.
+
+Folked from [https://github.com/blevesearch](https://github.com/pedronasser/caddy-search) .
+Modified to support Caddy V2, with a lot of new features.
 
 * Support Caddy V2
 * Use Bleve V2
