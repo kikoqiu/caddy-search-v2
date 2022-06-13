@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<title>Search results for: {{.Query}}</title>
+		<meta charset="utf-8">
+<style>
+body {
+	padding: 1% 2%;
+	font: 16px Arial;
+}
+
+form {
+	margin-bottom: 3em;
+}
+
+input {
+	font-size: 14px;
+	border: 1px solid #CCC;
+	background: #FFF;
+	line-height: 1.5em;
+	padding: 5px;
+}
+
+input[name=q] {
+	width: 100%;
+	max-width: 350px;
+}
+
+input[type=submit] {
+	border-radius: 5px;
+	padding: 5px 10px;
+}
+
+
+.result-title {
+	font-size: 18px;
+}
+
+.result-url {
+	font-size: 14px;
+	margin-bottom: 5px;
+	color: #777;
+}
+
+li {
+	margin-top: 15px;
+}
+</style>
+<script>
+</script>
+	</head>
+	<body>
+		<h1>Site Search</h1>
+
+		<form method="GET" action="{{.URL.Path}}">
+			<input type="text" name="q" value="{{.Query}}"> <input type="submit" value="Search">
+		</form>
+
+		{{if .Query}}
+		<p>
+			Found <b>{{len .Results}}</b> result{{if ne (len .Results) 1}}s{{end}} for <b>{{.Query}}</b>
+		</p>
+
+		<ol>
+			{{range .Results}}
+			<li>
+				<div class="result-title"><a href="{{.Path}}">{{.Title}}</a></div>
+				<div class="result-url">{{$.Req.Host}}{{.Path}}</div>
+				{{.Body}}
+			</li>
+			{{end}}
+		</ol>
+		{{end}}
+	</body>
+</html>

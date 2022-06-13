@@ -2,17 +2,15 @@ package bleve
 
 import (
 	"fmt"
-	"strconv"
 	"time"
 
-	"github.com/blevesearch/bleve"
-	"github.com/pedronasser/caddy-search/indexer"
-	"github.com/pedronasser/go-piper"
+	bleve "github.com/blevesearch/bleve/v2"
+	"github.com/blevesearch/bleve/v2/search/highlight/highlighter/html"
+	"github.com/caddyserver/caddy/v2/modules/caddy-search/indexer"
 )
 
 type bleveIndexer struct {
-	pipeline piper.Handler
-	bleve    bleve.Index
+	bleve bleve.Index
 }
 
 // Bleve's record data struct
@@ -20,36 +18,32 @@ type indexRecord struct {
 	Path     string
 	Title    string
 	Body     string
-	Modified string
-	Indexed  string
+	Modified time.Time
+	Indexed  time.Time
 }
 
 // Record method get existent or creates a new Record to be saved/updated in the indexer
 func (i *bleveIndexer) Record(path string) indexer.Record {
-	record := recordPool.Get().(*Record)
+	record := &Record{}
 	record.path = path
 	record.fullPath = ""
 	record.title = ""
 	record.document = make(map[string]interface{})
 	record.ignored = false
 	record.loaded = false
-	record.body = bufPool.Get().([]byte)
+	record.body = make([]byte, 0)
 	record.indexed = time.Time{}
 	record.modified = time.Time{}
 	record.indexer = i
+	record.mimetype = ""
 	return record
-}
-
-func (i *bleveIndexer) Kill(r indexer.Record) {
-	bufPool.Put(r.Body())
-	recordPool.Put(r)
 }
 
 // Search method lookup for records using a query
 func (i *bleveIndexer) Search(q string) (records []indexer.Record) {
 	query := bleve.NewQueryStringQuery(q)
 	request := bleve.NewSearchRequest(query)
-	request.Highlight = bleve.NewHighlight()
+	request.Highlight = bleve.NewHighlightWithStyle(html.Name) //bleve.NewHighlight()
 	result, err := i.bleve.Search(request)
 	if err != nil { // an empty query would cause this
 		return
@@ -73,32 +67,74 @@ func (i *bleveIndexer) Search(q string) (records []indexer.Record) {
 	return
 }
 
-// Pipe sends the new record to the pipeline
-func (i *bleveIndexer) Pipe(r indexer.Record) {
-	i.pipeline.Input() <- r
+// Index sends the new record to the pipeline
+func (i *bleveIndexer) Index(in indexer.Record) {
+	rec, ok := in.(*Record)
+	if !ok {
+		return
+	}
+	i.index(rec)
 }
 
-// index is the pipeline step that indexes the document
-func (i *bleveIndexer) index(in interface{}) interface{} {
-	if rec, ok := in.(*Record); ok {
+// index is the step that indexes the document
+func (i *bleveIndexer) index(rec *Record) {
+	if rec != nil && len(rec.body) > 0 && !rec.Ignored() {
+		rec.SetIndexed(time.Now())
+		fmt.Println(rec.FullPath())
 
-		if rec != nil && len(rec.body) > 0 && !rec.Ignored() {
-			rec.SetIndexed(time.Now())
-			fmt.Println(rec.FullPath())
-
-			r := indexRecord{
-				Path:     rec.Path(),
-				Title:    rec.Title(),
-				Body:     string(rec.body),
-				Modified: strconv.Itoa(int(rec.Modified().Unix())),
-				Indexed:  strconv.Itoa(int(rec.Indexed().Unix())),
-			}
-
-			i.bleve.Index(rec.Path(), r)
+		r := indexRecord{
+			Path:     rec.Path(),
+			Title:    rec.Title(),
+			Body:     string(rec.body),
+			Modified: rec.Modified(),
+			Indexed:  rec.Indexed(),
 		}
 
-		i.Kill(rec)
+		//t := time.Now()
+		i.bleve.Index(rec.Path(), r)
+		//fmt.Printf("1: %v\n", time.Since(t))
+	}
+}
+
+// New creates a new instance for this indexer
+func New(name string, analyzer string) (*bleveIndexer, error) {
+	blv, err := openIndex(name, analyzer)
+	if err != nil {
+		return nil, err
 	}
 
-	return in
+	indxr := &bleveIndexer{}
+	indxr.bleve = blv
+
+	return indxr, nil
+}
+func openIndex(name string, analyzer string) (bleve.Index, error) {
+	textFieldMapping := bleve.NewTextFieldMapping()
+
+	doc := bleve.NewDocumentMapping()
+	doc.AddFieldMappingsAt("Path", textFieldMapping)
+	doc.AddFieldMappingsAt("Title", textFieldMapping)
+	doc.AddFieldMappingsAt("Body", textFieldMapping)
+	doc.AddFieldMappingsAt("Modified", bleve.NewDateTimeFieldMapping())
+	doc.AddFieldMappingsAt("Indexed", bleve.NewDateTimeFieldMapping())
+
+	indexMap := bleve.NewIndexMapping()
+	switch analyzer {
+	case "sego":
+		AddSegoChineseAnalyzer(indexMap)
+	}
+	indexMap.DefaultAnalyzer = analyzer
+	indexMap.AddDocumentMapping("document", doc)
+
+	//blv, err := bleve.New(name, indexMap)
+	blv, err := bleve.NewUsing(name, indexMap, "scorch", "scorch", nil)
+
+	if err != nil {
+		blv, err = bleve.Open(name)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return blv, nil
 }

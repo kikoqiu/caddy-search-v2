@@ -9,13 +9,12 @@ import (
 type Handler interface {
 	Record(string) Record
 	Search(string) []Record
-	Pipe(Record)
-	Kill(Record)
+	Index(Record)
 }
 
 // Config ...
 type Config struct {
-	HostName       string
+	DbName         string
 	IndexDirectory string
 }
 
@@ -35,4 +34,6 @@ type Record interface {
 	Ignore()
 	Ignored() bool
 	Indexed() time.Time
+	MimeType() string
+	SetMimeType(string)
 }

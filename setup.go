@@ -2,83 +2,282 @@ package search
 
 import (
 	"crypto/md5"
+	_ "embed"
 	"encoding/hex"
+	"fmt"
 	"html/template"
+	"io/ioutil"
+	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
+	"sync"
 	"time"
 
-	"github.com/mholt/caddy"
-	"github.com/mholt/caddy/caddyhttp/httpserver"
-	"github.com/pedronasser/caddy-search/indexer"
-	"github.com/pedronasser/caddy-search/indexer/bleve"
+	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
+	"github.com/caddyserver/caddy/v2/modules/caddy-search/indexer"
+	"github.com/caddyserver/caddy/v2/modules/caddy-search/indexer/bleve"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/fsnotify/fsnotify"
 )
 
+// Search represents this middleware structure
+type Search struct {
+	DbName          string
+	Engine          string
+	IncludePathsStr []string
+	ExcludePathsStr []string
+	Endpoint        string
+	IndexDirectory  string
+	TemplateRaw     string
+	Expire          time.Duration
+	SiteRoot        string
+	NumWorkers      int
+	Analyzer        string
+	MaxSizeFile     int
+	FileWatcher     bool
+
+	Indexer      indexer.Handler
+	IndexManager *IndexerManager
+	IncludePaths []*regexp.Regexp
+	ExcludePaths []*regexp.Regexp
+	Template     *template.Template
+	closed       bool
+}
+
 func init() {
-	caddy.RegisterPlugin("search", caddy.Plugin{
-		ServerType: "http",
-		Action:     Setup,
-	})
+	caddy.RegisterModule(&Search{})
+	httpcaddyfile.RegisterHandlerDirective("search", parseCaddyfile)
+}
+
+// CaddyModule returns the Caddy module information.
+func (*Search) CaddyModule() caddy.ModuleInfo {
+	return caddy.ModuleInfo{
+		ID:  "http.handlers.search",
+		New: func() caddy.Module { return new(Search) },
+	}
+}
+
+// Provision sets up the module.
+func (search *Search) Provision(ctx caddy.Context) (err error) {
+	if search.closed {
+		log.Fatal("reuse module?")
+	}
+	templateStr := defaultTemplate
+	if search.TemplateRaw != "" {
+		buf, err := ioutil.ReadFile(search.TemplateRaw)
+		if err != nil {
+			return err
+		}
+		templateStr = string(buf)
+	}
+
+	search.Template, err = template.New("search-results").Parse(templateStr)
+	if err != nil {
+		return err
+	}
+
+	search.ExcludePaths = ConvertToRegExp(search.ExcludePathsStr)
+	search.IncludePaths = ConvertToRegExp(search.IncludePathsStr)
+
+	index, err := NewIndexer(search.Engine, indexer.Config{
+		DbName:         search.DbName,
+		IndexDirectory: search.IndexDirectory,
+	}, search.Analyzer)
+
+	if err != nil {
+		return err
+	}
+
+	ppl, err := NewIndexerManager(search, search.MaxSizeFile, index)
+
+	if err != nil {
+		return err
+	}
+
+	search.Indexer = index
+	search.IndexManager = ppl
+
+	go func() {
+		ScanToPipe(search.SiteRoot, ppl, index)
+		if search.Expire <= 0 {
+			return
+		}
+		expire := time.NewTicker(search.Expire)
+		for !search.closed {
+			<-expire.C
+			ScanToPipe(search.SiteRoot, ppl, index)
+		}
+	}()
+	if search.FileWatcher {
+		search.StartWatcher(search.SiteRoot, ppl, index)
+	}
+
+	return nil
 }
 
 // Setup creates a new middleware with the given configuration
-func Setup(c *caddy.Controller) (err error) {
-	cfg := httpserver.GetConfig(c)
-	var config *Config
-
-	config, err = ParseSearchConfig(c, cfg)
+func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
+	search := &Search{}
+	err := search.UnmarshalCaddyfile(h.Dispenser)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	return search, nil
+}
 
-	index, err := NewIndexer(config.Engine, indexer.Config{
-		HostName:       config.HostName,
-		IndexDirectory: config.IndexDirectory,
-	})
-
-	if err != nil {
-		return err
+// Validate implements caddy.Validator.
+func (m *Search) Validate() error {
+	if m.SiteRoot == "" {
+		return fmt.Errorf("search Site root is empty")
 	}
+	return nil
+}
+func (m *Search) Cleanup() error {
+	m.closed = true
+	return nil
+}
+func (m *Search) StartWatcher(fp string, indexManager *IndexerManager, index indexer.Handler) {
+	absPath, _ := filepath.Abs(fp)
 
-	ppl, err := NewPipeline(config, index)
+	dealwith := func(path string) {
+		info, err := os.Stat(path)
+		if err != nil {
+			log.Printf("Ignore watcher error %v,%v", err, path)
+			return
+		}
+		if info.IsDir() {
+			return
+		}
+		reqPath, err := filepath.Rel(absPath, path)
+		if err != nil {
+			return
+		}
+		reqPath = "/" + reqPath
+		u, err := url.Parse(reqPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		reqPath = u.String()
 
-	if err != nil {
-		return err
+		if indexManager.ValidatePath(reqPath) {
+			record := index.Record(reqPath)
+			record.SetFullPath(path)
+			record.SetModified(info.ModTime())
+			indexManager.Feed(record)
+		}
 	}
+	const checkdur = 30 * time.Second
 
-	expire := time.NewTicker(config.Expire)
+	var lk sync.Mutex
+	set := make(map[string]int)
+
 	go func() {
-		var lastScanned indexer.Record
-		lastScanned = ScanToPipe(config.SiteRoot, ppl, index)
-
-		for {
-			select {
-			case <-expire.C:
-				if lastScanned != nil && (!lastScanned.Indexed().IsZero() || lastScanned.Ignored()) {
-					lastScanned = ScanToPipe(config.SiteRoot, ppl, index)
+		ticker := time.NewTicker(checkdur)
+		toscan := make([]string, 0)
+		for !m.closed {
+			<-ticker.C
+			lk.Lock()
+			for key := range set {
+				stat, err := os.Stat(key)
+				if err != nil {
+					log.Printf("Ignore watcher error %v,%v", err, key)
+					delete(set, key)
+					continue
 				}
+				if time.Since(stat.ModTime()) < checkdur {
+					continue
+				}
+				delete(set, key)
+				toscan = append(toscan, key)
+			}
+			lk.Unlock()
+			if len(toscan) > 0 {
+				for _, v := range toscan {
+					dealwith(v)
+				}
+				toscan = make([]string, 0)
 			}
 		}
 	}()
 
-	search := &Search{
-		Config:   config,
-		Indexer:  index,
-		Pipeline: ppl,
+	queuefile := func(path string) {
+		info, err := os.Stat(path)
+		if err != nil {
+			log.Printf("Ignore watcher error %v,%v", err, path)
+			return
+		}
+		if info.IsDir() {
+			return
+		}
+		lk.Lock()
+		set[path] = 1
+		lk.Unlock()
 	}
 
-	cfg.AddMiddleware(func(next httpserver.Handler) httpserver.Handler {
-		search.Next = next
-		return search
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatal(err)
+	}
+	go func() {
+		ticker := time.NewTicker(checkdur)
+		for !m.closed {
+			select {
+			case <-ticker.C:
+				continue
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				//log.Println("event:", event)
+				if event.Op&fsnotify.Write == fsnotify.Write {
+					log.Println("modified file:", event.Name)
+					queuefile(event.Name)
+				}
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				log.Println("error:", err)
+			}
+		}
+	}()
+
+	err = watcher.Add(absPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	filepath.Walk(absPath, func(path string, info os.FileInfo, err error) error {
+		if info.Name() == "." {
+			return nil
+		}
+
+		if info.Name() == "" || info.Name()[0] == '.' {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if info.IsDir() {
+			err1 := watcher.Add(path)
+			if err1 != nil {
+				log.Fatal(err1)
+			}
+		}
+		return nil
 	})
 
-	return
 }
 
 // ScanToPipe ...
-func ScanToPipe(fp string, pipeline *Pipeline, index indexer.Handler) indexer.Record {
+func ScanToPipe(fp string, indexManager *IndexerManager, index indexer.Handler) indexer.Record {
 	var last indexer.Record
 	absPath, _ := filepath.Abs(fp)
 	filepath.Walk(absPath, func(path string, info os.FileInfo, err error) error {
@@ -99,12 +298,17 @@ func ScanToPipe(fp string, pipeline *Pipeline, index indexer.Handler) indexer.Re
 				return nil
 			}
 			reqPath = "/" + reqPath
+			u, err := url.Parse(reqPath)
+			if err != nil {
+				log.Fatal(err)
+			}
+			reqPath = GetUrlPath(u)
 
-			if pipeline.ValidatePath(reqPath) {
+			if indexManager.ValidatePath(reqPath) {
 				record := index.Record(reqPath)
 				record.SetFullPath(path)
 				record.SetModified(info.ModTime())
-				pipeline.Pipe(record)
+				indexManager.Feed(record)
 				last = record
 			}
 		}
@@ -115,51 +319,40 @@ func ScanToPipe(fp string, pipeline *Pipeline, index indexer.Handler) indexer.Re
 	return last
 }
 
+func GetUrlPath(u *url.URL) string {
+	reqPath := u.Path
+	if u.RawQuery != "" {
+		reqPath = reqPath + "?" + u.RawPath
+	}
+	if u.Fragment != "" {
+		reqPath = reqPath + "#" + u.EscapedFragment()
+	}
+	return reqPath
+}
+
 // NewIndexer creates a new Indexer with the received config
-func NewIndexer(engine string, config indexer.Config) (index indexer.Handler, err error) {
-	name := filepath.Clean(config.IndexDirectory + string(filepath.Separator) + config.HostName)
+func NewIndexer(engine string, config indexer.Config, analyzer string) (index indexer.Handler, err error) {
+	name := filepath.Clean(config.IndexDirectory + string(filepath.Separator) + config.DbName)
 	switch engine {
 	default:
-		index, err = bleve.New(name)
+		index, err = bleve.New(name, analyzer)
 	}
 	return
 }
 
-// Config represents this middleware configuration structure
-type Config struct {
-	HostName       string
-	Engine         string
-	Path           string
-	IncludePaths   []*regexp.Regexp
-	ExcludePaths   []*regexp.Regexp
-	Endpoint       string
-	IndexDirectory string
-	Template       *template.Template
-	Expire         time.Duration
-	SiteRoot       string
-}
-
-// ParseSearchConfig controller information to create a IndexSearch config
-func ParseSearchConfig(c *caddy.Controller, cnf *httpserver.SiteConfig) (*Config, error) {
-	hosthash := md5.New()
-	hosthash.Write([]byte(cnf.Host()))
-
-	conf := &Config{
-		HostName:       hex.EncodeToString(hosthash.Sum(nil)),
-		Engine:         `bleve`,
-		IndexDirectory: `/tmp/caddyIndex`,
-		IncludePaths:   []*regexp.Regexp{},
-		ExcludePaths:   []*regexp.Regexp{},
-		Endpoint:       `/search`,
-		SiteRoot:       cnf.Root,
-		Expire:         60 * time.Second,
-		Template:       nil,
-	}
-
-	_, err := os.Stat(conf.SiteRoot)
-	if err != nil {
-		return nil, c.Err("[search]: `invalid root directory`")
-	}
+// UnmarshalCaddyfile implements caddyfile.Unmarshaler.
+func (m *Search) UnmarshalCaddyfile(c *caddyfile.Dispenser) error {
+	m.DbName = ""
+	m.Engine = `bleve`
+	m.IndexDirectory = `/tmp/caddyIndex`
+	m.Endpoint = `/search`
+	m.SiteRoot = "."
+	m.Expire = 0 * time.Second
+	m.FileWatcher = true
+	m.TemplateRaw = ""
+	m.NumWorkers = 0
+	m.Analyzer = "standard"
+	m.MaxSizeFile = 1024 * 1024 * 50
 
 	incPaths := []string{}
 	excPaths := []string{}
@@ -169,86 +362,145 @@ func ParseSearchConfig(c *caddy.Controller, cnf *httpserver.SiteConfig) (*Config
 
 		switch len(args) {
 		case 2:
-			conf.Endpoint = args[1]
+			m.Endpoint = args[1]
 			fallthrough
 		case 1:
 			incPaths = append(incPaths, args[0])
 		}
 
-		for c.NextBlock() {
+		for c.NextBlock(0) {
 			switch c.Val() {
+			case "dbname":
+				if !c.NextArg() {
+					return c.ArgErr()
+				}
+				m.DbName = c.Val()
+			case "root":
+				if !c.NextArg() {
+					return c.ArgErr()
+				}
+				m.SiteRoot = c.Val()
 			case "engine":
 				if !c.NextArg() {
-					return nil, c.ArgErr()
+					return c.ArgErr()
 				}
-				conf.Engine = c.Val()
+				m.Engine = c.Val()
 			case "+path":
 				if !c.NextArg() {
-					return nil, c.ArgErr()
+					return c.ArgErr()
 				}
 				incPaths = append(incPaths, c.Val())
 				incPaths = append(incPaths, c.RemainingArgs()...)
 			case "-path":
 				if !c.NextArg() {
-					return nil, c.ArgErr()
+					return c.ArgErr()
 				}
 				excPaths = append(excPaths, c.Val())
 				excPaths = append(excPaths, c.RemainingArgs()...)
 			case "endpoint":
 				if !c.NextArg() {
-					return nil, c.ArgErr()
+					return c.ArgErr()
 				}
-				conf.Endpoint = c.Val()
+				m.Endpoint = c.Val()
 			case "expire":
 				if !c.NextArg() {
-					return nil, c.ArgErr()
+					return c.ArgErr()
 				}
 				exp, err := strconv.Atoi(c.Val())
 				if err != nil {
-					return nil, err
+					return err
 				}
-				conf.Expire = time.Duration(exp) * time.Second
+				m.Expire = time.Duration(exp) * time.Second
+			case "filewatcher":
+				if !c.NextArg() {
+					return c.ArgErr()
+				}
+				v, err := strconv.ParseBool(c.Val())
+				if err != nil {
+					return err
+				}
+				m.FileWatcher = v
 			case "datadir":
 				if !c.NextArg() {
-					return nil, c.ArgErr()
+					return c.ArgErr()
 				}
-				conf.IndexDirectory = c.Val()
+				m.IndexDirectory = c.Val()
+			case "numworkers":
+				if !c.NextArg() {
+					return c.ArgErr()
+				}
+				nw, err := strconv.Atoi(c.Val())
+				if err != nil {
+					return err
+				}
+				m.NumWorkers = nw
+			case "maxsize":
+				if !c.NextArg() {
+					return c.ArgErr()
+				}
+				val, err := strconv.Atoi(c.Val())
+				if err != nil {
+					return err
+				}
+				m.MaxSizeFile = val
+			case "analyzer":
+				if !c.NextArg() {
+					return c.ArgErr()
+				}
+				m.Analyzer = c.Val()
 			case "template":
-				var err error
 				if c.NextArg() {
-					conf.Template, err = template.ParseFiles(filepath.Join(conf.SiteRoot, c.Val()))
-					if err != nil {
-						return nil, err
-					}
+					m.TemplateRaw = c.Val()
 				}
 			}
 		}
+	}
+
+	if m.DbName == "" {
+		path, _ := os.Getwd()
+		hosthash := md5.New()
+		hosthash.Write([]byte(path))
+		m.DbName = hex.EncodeToString(hosthash.Sum(nil))
+	}
+
+	_, err := os.Stat(m.SiteRoot)
+	if err != nil {
+		return c.Err("[search]: `invalid root directory`")
 	}
 
 	if len(incPaths) == 0 {
 		incPaths = append(incPaths, "^/")
 	}
 
-	conf.IncludePaths = ConvertToRegExp(incPaths)
-	conf.ExcludePaths = ConvertToRegExp(excPaths)
+	m.IncludePathsStr = incPaths
+	m.ExcludePathsStr = excPaths
 
-	dir := conf.IndexDirectory
+	dir := m.IndexDirectory
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		if err := os.MkdirAll(dir, os.ModePerm); err != nil {
-			return nil, c.Err("[search] Given 'datadir' not a valid path.")
+			return c.Err("[search] Given 'datadir' not a valid path.")
 		}
 	}
 
-	if conf.Template == nil {
-		var err error
-		conf.Template, err = template.New("search-results").Parse(defaultTemplate)
-		if err != nil {
-			return nil, err
+	if m.NumWorkers <= 0 {
+		nc := runtime.NumCPU() / 2
+		if nc <= 0 {
+			nc = 1
 		}
+		m.NumWorkers = nc
 	}
 
-	return conf, nil
+	return nil
 }
+
+// Interface guards
+var (
+	_ caddy.Provisioner           = (*Search)(nil)
+	_ caddy.Validator             = (*Search)(nil)
+	_ caddyhttp.MiddlewareHandler = (*Search)(nil)
+	_ caddyfile.Unmarshaler       = (*Search)(nil)
+	_ caddy.CleanerUpper          = (*Search)(nil)
+)
 
 // ConvertToRegExp compile a string regular expression to multiple *regexp.Regexp instances
 func ConvertToRegExp(rexp []string) (r []*regexp.Regexp) {
@@ -266,80 +518,5 @@ func ConvertToRegExp(rexp []string) (r []*regexp.Regexp) {
 }
 
 // The default template to use when serving up HTML search results
-const defaultTemplate = `<!DOCTYPE html>
-<html>
-	<head>
-		<title>Search results for: {{.Query}}</title>
-		<meta charset="utf-8">
-<style>
-body {
-	padding: 1% 2%;
-	font: 16px Arial;
-}
-
-form {
-	margin-bottom: 3em;
-}
-
-input {
-	font-size: 14px;
-	border: 1px solid #CCC;
-	background: #FFF;
-	line-height: 1.5em;
-	padding: 5px;
-}
-
-input[name=q] {
-	width: 100%;
-	max-width: 350px;
-}
-
-input[type=submit] {
-	border-radius: 5px;
-	padding: 5px 10px;
-}
-
-p,
-li {
-	max-width: 600px;
-}
-
-.result-title {
-	font-size: 18px;
-}
-
-.result-url {
-	font-size: 14px;
-	margin-bottom: 5px;
-	color: #777;
-}
-
-li {
-	margin-top: 15px;
-}
-</style>
-	</head>
-	<body>
-		<h1>Site Search</h1>
-
-		<form method="GET" action="{{.URL.Path}}">
-			<input type="text" name="q" value="{{.Query}}"> <input type="submit" value="Search">
-		</form>
-
-		{{if .Query}}
-		<p>
-			Found <b>{{len .Results}}</b> result{{if ne (len .Results) 1}}s{{end}} for <b>{{.Query}}</b>
-		</p>
-
-		<ol>
-			{{range .Results}}
-			<li>
-				<div class="result-title"><a href="{{.Path}}">{{.Title}}</a></div>
-				<div class="result-url">{{$.Req.Host}}{{.Path}}</div>
-				{{.Body}}
-			</li>
-			{{end}}
-		</ol>
-		{{end}}
-	</body>
-</html>`
+//go:embed defaulttemplate.html
+var defaultTemplate string
