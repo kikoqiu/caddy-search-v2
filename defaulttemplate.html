@@ -35,8 +35,16 @@ input[type=submit] {
 .result-title {
 	font-size: 18px;
 }
-
+li,p {
+	max-width:800px;
+}
 .result-url {
+	font-size: 14px;
+	margin-bottom: 5px;
+	color: #777;
+}
+
+.datetime {
 	font-size: 14px;
 	margin-bottom: 5px;
 	color: #777;
@@ -65,6 +73,7 @@ li {
 			{{range .Results}}
 			<li>
 				<div class="result-title"><a href="{{.Path}}">{{.Title}}</a></div>
+				<span class='datetime'>{{.Modified.Format "2006-01-02 15:04:05"}}</span>
 				<div class="result-url">{{$.Req.Host}}{{.Path}}</div>
 				{{.Body}}
 			</li>

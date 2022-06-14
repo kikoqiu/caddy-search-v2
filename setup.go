@@ -146,6 +146,7 @@ func (m *Search) StartWatcher(fp string, indexManager *IndexerManager, index ind
 	absPath, _ := filepath.Abs(fp)
 
 	dealwith := func(path string) {
+		log.Printf("Watcher processes %v", path)
 		info, err := os.Stat(path)
 		if err != nil {
 			log.Printf("Ignore watcher error %v,%v", err, path)
@@ -172,12 +173,14 @@ func (m *Search) StartWatcher(fp string, indexManager *IndexerManager, index ind
 			indexManager.Feed(record)
 		}
 	}
-	const checkdur = 30 * time.Second
+	//index file if the file is not modified for checkdur
+	const checkdur = 10 * time.Second
 
 	var lk sync.Mutex
 	set := make(map[string]int)
 
 	go func() {
+		log.Printf("Watcher queue starting...")
 		ticker := time.NewTicker(checkdur)
 		toscan := make([]string, 0)
 		for !m.closed {
@@ -191,6 +194,7 @@ func (m *Search) StartWatcher(fp string, indexManager *IndexerManager, index ind
 					continue
 				}
 				if time.Since(stat.ModTime()) < checkdur {
+					log.Printf("Watcher queue compare %v - %v = %v", time.Now().Format("2006-01-02 15:04:05"), stat.ModTime().Format("2006-01-02 15:04:05"), time.Since(stat.ModTime()))
 					continue
 				}
 				delete(set, key)
@@ -204,6 +208,7 @@ func (m *Search) StartWatcher(fp string, indexManager *IndexerManager, index ind
 				toscan = make([]string, 0)
 			}
 		}
+		log.Printf("Watcher queue exiting...")
 	}()
 
 	queuefile := func(path string) {
@@ -226,6 +231,7 @@ func (m *Search) StartWatcher(fp string, indexManager *IndexerManager, index ind
 	}
 	go func() {
 		ticker := time.NewTicker(checkdur)
+		prevFile := ""
 		for !m.closed {
 			select {
 			case <-ticker.C:
@@ -236,7 +242,10 @@ func (m *Search) StartWatcher(fp string, indexManager *IndexerManager, index ind
 				}
 				//log.Println("event:", event)
 				if event.Op&fsnotify.Write == fsnotify.Write {
-					log.Println("modified file:", event.Name)
+					if prevFile != event.Name {
+						log.Println("Modified: ", event.Name)
+					}
+					prevFile = event.Name
 					queuefile(event.Name)
 				}
 			case err, ok := <-watcher.Errors:

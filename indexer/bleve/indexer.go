@@ -1,7 +1,6 @@
 package bleve
 
 import (
-	"fmt"
 	"time"
 
 	bleve "github.com/blevesearch/bleve/v2"
@@ -40,10 +39,12 @@ func (i *bleveIndexer) Record(path string) indexer.Record {
 }
 
 // Search method lookup for records using a query
-func (i *bleveIndexer) Search(q string) (records []indexer.Record) {
+func (i *bleveIndexer) Search(q string, from, size int) (records []indexer.Record) {
 	query := bleve.NewQueryStringQuery(q)
 	request := bleve.NewSearchRequest(query)
 	request.Highlight = bleve.NewHighlightWithStyle(html.Name) //bleve.NewHighlight()
+	request.From = from
+	request.Size = size
 	result, err := i.bleve.Search(request)
 	if err != nil { // an empty query would cause this
 		return
@@ -80,7 +81,7 @@ func (i *bleveIndexer) Index(in indexer.Record) {
 func (i *bleveIndexer) index(rec *Record) {
 	if rec != nil && len(rec.body) > 0 && !rec.Ignored() {
 		rec.SetIndexed(time.Now())
-		fmt.Println(rec.FullPath())
+		//fmt.Println(rec.FullPath())
 
 		r := indexRecord{
 			Path:     rec.Path(),

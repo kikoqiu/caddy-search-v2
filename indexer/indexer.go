@@ -8,7 +8,7 @@ import (
 // Handler ...
 type Handler interface {
 	Record(string) Record
-	Search(string) []Record
+	Search(string, int, int) []Record
 	Index(Record)
 }
 

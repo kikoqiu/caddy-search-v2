@@ -2,7 +2,6 @@ package search
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"log"
 	"os"
@@ -44,7 +43,7 @@ func NewIndexerManager(config *Search, MaxFileSize int, indxr indexer.Handler) (
 					indoc := indxr.Record(rc.Path())
 					if indoc.Load() {
 						if indoc.Indexed().After(rc.Modified()) {
-							log.Printf("Ignored %v, indexed %v > modified %v ", rc.Path(), indoc.Indexed(), rc.Modified())
+							log.Printf("Ignored: %v \n Indexed %v > Modified %v ", rc.Path(), indoc.Indexed().Format("2006-01-02 15:04:05"), rc.Modified().Format("2006-01-02 15:04:05"))
 							rc.Ignore()
 							continue
 						}
@@ -72,7 +71,7 @@ func NewIndexerManager(config *Search, MaxFileSize int, indxr indexer.Handler) (
 						}
 						if isBinary {
 							rc.Ignore()
-							return
+							continue
 						}
 
 						in, err := os.Open(rc.FullPath())
@@ -153,9 +152,10 @@ func (p *IndexerManager) index(record indexer.Record) {
 		title, _ := getHtmlTitle(body, path.Base(record.Path()))
 		record.SetTitle(title)
 		stripped := bm.SanitizeBytes(record.Body())
-		fmt.Printf("%v/%v", len(stripped), len(record.Body()))
+		log.Printf("Size %v/%v: %v", len(stripped), len(record.Body()), record.FullPath())
 		record.SetBody(stripped)
 	} else {
+		log.Printf("Size %v: %v", len(record.Body()), record.FullPath())
 		record.SetTitle(path.Base(record.Path()))
 	}
 

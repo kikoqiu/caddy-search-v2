@@ -70,7 +70,7 @@ func GetDateTime(f index.Field) time.Time {
 	if err != nil {
 		return time.Unix(0, 0)
 	}
-	return ret
+	return ret.Local()
 }
 
 // Load this record from the indexer.

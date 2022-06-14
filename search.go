@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"html/template"
 	"net/http"
+	"strconv"
 	"time"
 
 	//TODO remove this
@@ -48,12 +49,23 @@ type Result struct {
 	Json     string
 	Modified time.Time
 	Indexed  time.Time
+	From     int
+	Size     int
 }
 
 // SearchJSON renders the search results in JSON format
 func (s *Search) SearchJSON(w http.ResponseWriter, r *http.Request) error {
-	q := r.URL.Query().Get("q")
-	indexResult := s.Indexer.Search(q)
+	qry := r.URL.Query()
+	q := qry.Get("q")
+	from := 0
+	size := 100
+	if f, err := strconv.Atoi(qry.Get("f")); err == nil {
+		from = f
+	}
+	if s, err := strconv.Atoi(qry.Get("s")); err == nil {
+		size = s
+	}
+	indexResult := s.Indexer.Search(q, from, size)
 
 	results := make([]Result, len(indexResult))
 
@@ -65,6 +77,8 @@ func (s *Search) SearchJSON(w http.ResponseWriter, r *http.Request) error {
 			Modified: result.Modified(),
 			Indexed:  result.Indexed(),
 			Json:     string(body),
+			From:     from,
+			Size:     size,
 		}
 	}
 
@@ -80,9 +94,18 @@ func (s *Search) SearchJSON(w http.ResponseWriter, r *http.Request) error {
 
 // SearchHTML renders the search results in the HTML template
 func (s *Search) SearchHTML(w http.ResponseWriter, r *http.Request) error {
-	q := r.URL.Query().Get("q")
+	qry := r.URL.Query()
+	q := qry.Get("q")
+	from := 0
+	size := 100
+	if f, err := strconv.Atoi(qry.Get("f")); err == nil {
+		from = f
+	}
+	if s, err := strconv.Atoi(qry.Get("s")); err == nil {
+		size = s
+	}
 
-	indexResult := s.Indexer.Search(q)
+	indexResult := s.Indexer.Search(q, from, size)
 
 	results := make([]Result, len(indexResult))
 
@@ -92,6 +115,8 @@ func (s *Search) SearchHTML(w http.ResponseWriter, r *http.Request) error {
 			Title:    result.Title(),
 			Modified: result.Modified(),
 			Body:     template.HTML(result.Body()),
+			From:     from,
+			Size:     size,
 		}
 	}
 
