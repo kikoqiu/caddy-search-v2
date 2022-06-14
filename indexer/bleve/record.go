@@ -66,11 +66,13 @@ func (r *Record) Body() []byte {
 	return r.body
 }
 func GetDateTime(f index.Field) time.Time {
-	ret, err := f.(index.DateTimeField).DateTime()
-	if err != nil {
-		return time.Unix(0, 0)
+	if f != nil {
+		ret, err := f.(index.DateTimeField).DateTime()
+		if err == nil {
+			return ret.Local()
+		}
 	}
-	return ret.Local()
+	return time.Unix(0, 0)
 }
 
 // Load this record from the indexer.

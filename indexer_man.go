@@ -49,31 +49,33 @@ func NewIndexerManager(config *Search, MaxFileSize int, indxr indexer.Handler) (
 						}
 					}
 
-					if len(rc.Body()) <= 0 {
-						var detectedMIME *mimetype.MIME = nil
-
-						if rc.MimeType() != "" {
-							detectedMIME = mimetype.Lookup(strings.Split(rc.MimeType(), ";")[0])
-						}
-						if detectedMIME == nil {
+					var detectedMIME *mimetype.MIME = nil
+					if rc.MimeType() != "" {
+						detectedMIME = mimetype.Lookup(strings.Split(rc.MimeType(), ";")[0])
+					}
+					if detectedMIME == nil {
+						if len(rc.Body()) <= 0 {
 							detectedMIME, _ = mimetype.DetectFile(rc.FullPath())
+						} else {
+							detectedMIME = mimetype.Detect(rc.Body())
 						}
-						if detectedMIME != nil {
-							rc.SetMimeType(detectedMIME.String())
+					}
+					if detectedMIME != nil {
+						rc.SetMimeType(detectedMIME.String())
+					}
+					isBinary := true
+					for mtype := detectedMIME; mtype != nil; mtype = mtype.Parent() {
+						if mtype.Is("text/plain") {
+							isBinary = false
+							break
 						}
+					}
+					if isBinary {
+						rc.Ignore()
+						continue
+					}
 
-						isBinary := true
-						for mtype := detectedMIME; mtype != nil; mtype = mtype.Parent() {
-							if mtype.Is("text/plain") {
-								isBinary = false
-								break
-							}
-						}
-						if isBinary {
-							rc.Ignore()
-							continue
-						}
-
+					if len(rc.Body()) <= 0 {
 						in, err := os.Open(rc.FullPath())
 						if err != nil {
 							rc.Ignore()
@@ -152,10 +154,10 @@ func (p *IndexerManager) index(record indexer.Record) {
 		title, _ := getHtmlTitle(body, path.Base(record.Path()))
 		record.SetTitle(title)
 		stripped := bm.SanitizeBytes(record.Body())
-		log.Printf("Size %v/%v: %v", len(stripped), len(record.Body()), record.FullPath())
+		log.Printf("Size %v/%v: %v", len(stripped), len(record.Body()), record.Path())
 		record.SetBody(stripped)
 	} else {
-		log.Printf("Size %v: %v", len(record.Body()), record.FullPath())
+		log.Printf("Size %v: %v", len(record.Body()), record.Path())
 		record.SetTitle(path.Base(record.Path()))
 	}
 

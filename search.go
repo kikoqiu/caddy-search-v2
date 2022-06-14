@@ -33,7 +33,11 @@ func (s *Search) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 		modTime, err := time.Parse(`Mon, 2 Jan 2006 15:04:05 MST`, modif)
 		if err == nil {
 			record.SetModified(modTime)
+		} else {
+			record.SetModified(time.Now())
 		}
+	} else {
+		record.SetModified(time.Now())
 	}
 
 	s.IndexManager.Feed(record)
